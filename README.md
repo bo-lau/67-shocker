@@ -16,6 +16,18 @@ Webcam detects the “6‑7” gesture and tells an Arduino Uno to close a relay
 
 ---
 
+## Disclaimer
+
+This project is provided **for educational purposes only**. It involves electrical stimulation hardware and Arduino‑controlled relays.
+
+- You are solely responsible for how you build and use this project.  
+- There is **no warranty** and **no guarantee of safety or fitness for any purpose**.  
+- By using this code or wiring, you agree that the author of this repo are **not liable** for any injury, damage, or consequences that may result.
+
+If you are unsure about safety, **do not build or use this project**. 
+
+---
+
 ## Arduino
 
 1. Open the repo’s `.ino` file in **Arduino IDE**.  
