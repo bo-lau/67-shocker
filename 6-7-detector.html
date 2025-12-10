@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>6-7 Detector</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      overflow: hidden;
+      font-family: 'Arial', sans-serif;
+    }
+    video {
+      display: none;
+    }
+    canvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      object-fit: cover;
+      z-index: 1;
+    }
+    .notification {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: rgba(100, 100, 100, 0.6);
+      border: 2px solid rgba(150, 150, 150, 0.8);
+      opacity: 1;
+      transform: translateY(0);
+      transition: all 0.3s ease;
+      pointer-events: none;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      z-index: 10;
+    }
+    .notification.detected {
+      background: rgba(34, 197, 94, 1);
+      border-color: rgba(34, 197, 94, 1);
+      box-shadow: 0 0 15px rgba(34, 197, 94, 0.8);
+      animation: pulse 0.5s ease;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.1); }
+    }
+    #connectBtn {
+      position: fixed;
+      top: 20px;
+      left: 20px;
+      z-index: 20;
+      padding: 8px 14px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <button id="connectBtn">Connect Arduino</button>
+  <video id="video" playsinline></video>
+  <canvas id="canvas"></canvas>
+  <div class="notification" id="notification"></div>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const notification = document.getElementById('notification');
+
+    let lastState = null;
+    let leftHandY = null;
+    let rightHandY = null;
+    let leftHandHistory = [];
+    let rightHandHistory = [];
+    const historyLength = 3; // Minimal history for immediate detection
+    let lastNotificationTime = 0;
+    const notificationCooldown = 100; // Minimal cooldown for responsiveness
+
+    // ---------- Web Serial ----------
+    let port;
+    let writer;
+
+    async function connectArduino() {
+      if (!("serial" in navigator)) {
+        alert("Web Serial API not supported. Use Chrome or Edge.");
+        return;
+      }
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 9600 });
+
+        const textEncoder = new TextEncoderStream();
+        textEncoder.readable.pipeTo(port.writable);
+        writer = textEncoder.writable.getWriter();
+
+        console.log("Arduino connected");
+        document.getElementById('connectBtn').textContent = "Arduino Connected";
+      } catch (err) {
+        console.error("Serial error:", err);
+      }
+    }
+
+    async function triggerPulse() {
+      if (!writer) {
+        console.warn("Arduino not connected yet");
+        return;
+      }
+      try {
+        await writer.write('p'); // Uno will pulse the relay
+      } catch (err) {
+        console.error("Write failed:", err);
+      }
+    }
+
+    document.getElementById('connectBtn').addEventListener('click', connectArduino);
+
+    // ---------- MediaPipe Hands ----------
+    const hands = new Hands({
+      locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+      }
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.7
+    });
+
+    hands.onResults(onResults);
+
+    const camera = new Camera(video, {
+      onFrame: async () => {
+        await hands.send({ image: video });
+      },
+      width: 1280,
+      height: 720
+    });
+    camera.start();
+
+    function onResults(results) {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+
+      ctx.save();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+
+      const videoAspect = results.image.width / results.image.height;
+      const canvasAspect = canvas.width / canvas.height;
+      let drawWidth, drawHeight, offsetX, offsetY;
+
+      if (canvasAspect > videoAspect) {
+        drawWidth = canvas.width;
+        drawHeight = canvas.width / videoAspect;
+        offsetX = 0;
+        offsetY = (canvas.height - drawHeight) / 2;
+      } else {
+        drawHeight = canvas.height;
+        drawWidth = canvas.height * videoAspect;
+        offsetX = (canvas.width - drawWidth) / 2;
+        offsetY = 0;
+      }
+
+      ctx.drawImage(results.image, offsetX, offsetY, drawWidth, drawHeight);
+
+      if (results.multiHandLandmarks && results.multiHandedness) {
+        leftHandY = null;
+        rightHandY = null;
+
+        for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+          const landmarks = results.multiHandLandmarks[i];
+          const handedness = results.multiHandedness[i].label;
+
+          const scaledLandmarks = landmarks.map(lm => ({
+            x: offsetX + (lm.x * drawWidth),
+            y: offsetY + (lm.y * drawHeight),
+            z: lm.z
+          }));
+
+          drawConnectors(ctx, scaledLandmarks, HAND_CONNECTIONS,
+                         {color: '#00FF00', lineWidth: 3});
+          drawLandmarks(ctx, scaledLandmarks,
+                        {color: '#FF0000', lineWidth: 2, radius: 5});
+
+          const wrist = landmarks[0];
+          const wristY = wrist.y;
+
+          if (handedness === 'Left') {
+            rightHandY = wristY;
+            rightHandHistory.push(wristY);
+            if (rightHandHistory.length > historyLength) rightHandHistory.shift();
+          } else if (handedness === 'Right') {
+            leftHandY = wristY;
+            leftHandHistory.push(wristY);
+            if (leftHandHistory.length > historyLength) leftHandHistory.shift();
+          }
+        }
+
+        detectPattern();
+      } else {
+        leftHandY = null;
+        rightHandY = null;
+        leftHandHistory = [];
+        rightHandHistory = [];
+      }
+
+      ctx.restore();
+    }
+
+    function detectPattern() {
+      // Require minimal history for immediate detection
+      if (leftHandY === null || rightHandY === null ||
+          leftHandHistory.length < 2 ||
+          rightHandHistory.length < 2) {
+        lastState = null;
+        return;
+      }
+
+      // Use velocity for immediate detection (last 2 frames)
+      let leftVelocity = 0;
+      let rightVelocity = 0;
+      let leftHasMovement = false;
+      let rightHasMovement = false;
+
+      if (leftHandHistory.length >= 2) {
+        const recent = leftHandHistory.slice(-2);
+        leftVelocity = recent[1] - recent[0];
+        // Lower threshold for more sensitive detection
+        if (Math.abs(leftVelocity) > 0.015) {
+          leftHasMovement = true;
+        }
+      }
+
+      if (rightHandHistory.length >= 2) {
+        const recent = rightHandHistory.slice(-2);
+        rightVelocity = recent[1] - recent[0];
+        if (Math.abs(rightVelocity) > 0.015) {
+          rightHasMovement = true;
+        }
+      }
+
+      // Check if both hands are moving in sync (same direction)
+      const bothMovingSameDirection = 
+        (leftVelocity > 0 && rightVelocity > 0) || // Both moving down
+        (leftVelocity < 0 && rightVelocity < 0);  // Both moving up
+
+      // Check for bouncing pattern with minimal history
+      let leftHasBounce = false;
+      let rightHasBounce = false;
+
+      if (leftHandHistory.length >= 3) {
+        const recent = leftHandHistory.slice(-3);
+        const min = Math.min(...recent);
+        const max = Math.max(...recent);
+        // Lower threshold for quicker detection
+        if (max - min > 0.02) {
+          leftHasBounce = true;
+        }
+      }
+
+      if (rightHandHistory.length >= 3) {
+        const recent = rightHandHistory.slice(-3);
+        const min = Math.min(...recent);
+        const max = Math.max(...recent);
+        if (max - min > 0.02) {
+          rightHasBounce = true;
+        }
+      }
+
+      // Immediate detection when both hands moving together with bounce
+      if (leftHasMovement && rightHasMovement && 
+          bothMovingSameDirection && 
+          (leftHasBounce || rightHasBounce)) {
+        if (lastState !== 'detected') {
+          showNotification();
+          lastState = 'detected';
+        }
+      } else {
+        lastState = null;
+      }
+    }
+
+    function showNotification() {
+      const now = Date.now();
+      if (now - lastNotificationTime < notificationCooldown) return;
+      lastNotificationTime = now;
+
+      console.log('6-7 detected!');
+
+      // Trigger Arduino pulse here
+      triggerPulse();
+
+      notification.classList.add('detected');
+      setTimeout(() => {
+        notification.classList.remove('detected');
+      }, 2000);
+    }
+
+    function drawConnectors(ctx, landmarks, connections, style) {
+      ctx.strokeStyle = style.color;
+      ctx.lineWidth = style.lineWidth;
+      for (const connection of connections) {
+        const from = landmarks[connection[0]];
+        const to = landmarks[connection[1]];
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        ctx.stroke();
+      }
+    }
+
+    function drawLandmarks(ctx, landmarks, style) {
+      ctx.fillStyle = style.color;
+      for (const landmark of landmarks) {
+        ctx.beginPath();
+        ctx.arc(landmark.x, landmark.y, style.radius, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
+
+    const HAND_CONNECTIONS = [
+      [0, 1], [1, 2], [2, 3], [3, 4],
+      [0, 5], [5, 6], [6, 7], [7, 8],
+      [0, 9], [9, 10], [10, 11], [11, 12],
+      [0, 13], [13, 14], [14, 15], [15, 16],
+      [0, 17], [17, 18], [18, 19], [19, 20],
+      [5, 9], [9, 13], [13, 17]
+    ];
+
+    window.addEventListener('resize', () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    });
+  </script>
+</body>
+</html>
